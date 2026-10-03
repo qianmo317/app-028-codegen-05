@@ -1,6 +1,7 @@
 /**
  * 第 10 节验收标准的自动化断言（在浏览器里跑，结果直接显示在「裁切参数」页）
  */
+import { buildCustomerReport } from './customers'
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
@@ -482,6 +483,112 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 多客户合并拼版：客户块互不相交、可贯通裁开；结果稳定；整批失败点名客户 */
+function assertCustomerMerge(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const opts: PackOptions = {
+    paperW: 100,
+    paperH: 100,
+    marginMm: 0,
+    safeEdgeMm: 0,
+    gapMm: 0,
+    kerfMm: 0,
+    allowRotate: false,
+    customerMode: true,
+  }
+  const groups: PackGroup[] = [
+    { itemId: 'a1', customerId: 'A', customerName: 'A', copies: 4, photoW: 25, photoH: 25, allowRotate: false, keepTogether: false },
+    { itemId: 'b1', customerId: 'B', customerName: 'B', copies: 4, photoW: 25, photoH: 25, allowRotate: false, keepTogether: false },
+  ]
+  const first = pack(groups, opts)
+  const second = pack(groups, opts)
+  if (first.error || second.error) {
+    problems.push(first.error ?? second.error ?? '合并排样失败')
+  } else {
+    const sig = (r: typeof first.result) =>
+      r.sheets
+        .flatMap((s) => s.placements)
+        .map((p) => `${p.customerId}:${p.sheetIndex}:${p.x.toFixed(3)},${p.y.toFixed(3)}`)
+        .join('|')
+    if (sig(first.result) !== sig(second.result)) problems.push('同一批输入连排两次，坐标结果不一致')
+    const task = {
+      id: 'merge',
+      name: '客户合并自检',
+      paperId: 'x',
+      items: [
+        { id: 'a1', sizeId: '', qty: 4, rotateAllowed: false, repeatSamePhoto: true, keepTogether: false, customerId: 'A' },
+        { id: 'b1', sizeId: '', qty: 4, rotateAllowed: false, repeatSamePhoto: true, keepTogether: false, customerId: 'B' },
+      ],
+      gapMm: 0,
+      kerfMm: 0,
+      safeEdgeMm: 0,
+      allowRotate: false,
+      mergeCustomers: true,
+      headerText: '',
+      footerText: '',
+      createdAt: 0,
+    }
+    const paper: Paper = { id: 'x', name: 'test', wMm: 100, hMm: 100, marginMm: 0, priceCents: 100, kind: 'sheet' }
+    const report = buildCustomerReport(task, paper, first.result.sheets, { merged: true, baselineSheets: 2 })
+    if (report.packages.length !== 2) problems.push('应拆出 2 个客户取件包')
+    if (report.savedSheets !== 2 - first.result.sheets.length) problems.push('节省张数计算错误')
+    for (const p of report.packages) {
+      if (p.photoCount !== 4) problems.push(`客户 ${p.customerName} 照片数应为 4`)
+      if (!p.blocks.length) problems.push(`客户 ${p.customerName} 没有独立块`)
+      if (!p.cuts.some((c) => c.role !== 'internal')) {
+        problems.push(`客户 ${p.customerName} 缺少分户边界刀`)
+      }
+    }
+    const aBlocks = report.blocks.filter((b) => b.customerId === 'A')
+    const bBlocks = report.blocks.filter((b) => b.customerId === 'B')
+    if (aBlocks.length !== 1 || bBlocks.length !== 1) {
+      problems.push('上/下两客户应各成 1 个独立可裁块')
+    } else {
+      const expected = { x: 0, y: 0, w: 100, h: 25 }
+      for (const [b, exp] of [
+        [aBlocks[0], expected],
+        [bBlocks[0], { x: 0, y: 25, w: 100, h: 75 }],
+      ] as const) {
+        for (const [k, v] of Object.entries(exp)) {
+          if (Math.abs((b as unknown as Record<string, number>)[k] - v) > 0.02) {
+            problems.push('分户块坐标/尺寸与实际贯通刀路不一致')
+          }
+        }
+      }
+      if (!report.cuts.some((c) => c.at === 25 && c.axis === 'h' && c.role === 'boundary')) {
+        problems.push('缺少 h=25mm 的分户边界刀')
+      }
+    }
+    for (let i = 0; i < report.blocks.length; i++) {
+      for (let j = i + 1; j < report.blocks.length; j++) {
+        if (overlap(report.blocks[i], report.blocks[j])) problems.push('客户独立块相交')
+      }
+    }
+    for (const sheet of first.result.sheets) {
+      const region = usableRegion(opts)!
+      const v = validateCutSequence(region, slotsOf(sheet, opts), cutsOf(sheet))
+      if (!v.ok) problems.push(`合并排样不合法：${v.reason}`)
+    }
+  }
+  const tooBig = pack(
+    [{ itemId: 'c1', customerId: 'C', customerName: 'C', copies: 1, photoW: 120, photoH: 10, allowRotate: false, keepTogether: false }],
+    opts,
+  )
+  if (!tooBig.error || !tooBig.error.includes('客户「C」')) {
+    problems.push('真排不下时应整批停止并点名客户 C')
+  }
+  return {
+    id: 'customers',
+    title: '⑧ 多客户合并拼版：独立客户块、合并刀路分户、稳定复现、失败点名客户',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `A/B 各 4 张混合排样后取件块互不相交，全部沿用同一合并切割步骤；连排两次坐标一致；超大件返回「客户「C」」停止原因`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -500,6 +607,7 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
       ms: 0,
     })
   }
+  results.push(assertCustomerMerge())
   results.push(assertPerformance())
   return results
 }

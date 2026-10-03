@@ -2,6 +2,7 @@
 import papersJson from '../data/papers.json'
 import type { PackGroup, PackOptions } from './packer'
 import type { Item, Paper, PaperTemplate, PhotoSize, Task } from './types'
+import { UNASSIGNED_CUSTOMER_ID, UNASSIGNED_CUSTOMER_NAME } from './customers'
 
 export const BUILTIN_PAPERS: Paper[] = papersJson.papers as Paper[]
 export const BUILTIN_PHOTO_SIZES: PhotoSize[] = papersJson.photoSizes as PhotoSize[]
@@ -38,6 +39,8 @@ export function groupsFromTask(task: Task, sizes: PhotoSize[]): PackGroup[] {
     if (!s || item.qty <= 0) continue
     out.push({
       itemId: item.id,
+      customerId: item.customerId?.trim() || UNASSIGNED_CUSTOMER_ID,
+      customerName: item.customerId?.trim() || UNASSIGNED_CUSTOMER_NAME,
       copies: item.qty,
       photoW: s.wMm,
       photoH: s.hMm,

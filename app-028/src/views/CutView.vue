@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import SheetView from '../components/SheetView.vue'
 import RulerScale from '../components/RulerScale.vue'
-import { allPapers, getTask, makeThumbResolver, photoVersion, sheetsOf } from '../store'
+import { allPapers, getTask, makeThumbResolver, photoVersion, sheetsOf, customerReportOf } from '../store'
 import { resolvePaper } from '../logic/library'
 import type { CutStep, Task } from '../logic/types'
 
@@ -13,6 +13,8 @@ const router = useRouter()
 const task = computed<Task | undefined>(() => getTask(String(route.params.id)))
 const paper = computed(() => (task.value ? resolvePaper(task.value, allPapers.value) : allPapers.value[0]))
 const sheets = computed(() => (task.value ? sheetsOf(task.value) : []))
+const customerReport = computed(() => (task.value ? customerReportOf(task.value) : undefined))
+const activeCustomer = ref('')
 const activeSheet = ref(0)
 const step = ref(0)
 const playing = ref(false)
@@ -20,6 +22,21 @@ let timer: number | undefined
 
 const sheet = computed(() => sheets.value[Math.min(activeSheet.value, sheets.value.length - 1)])
 const steps = computed(() => sheet.value?.cutSteps ?? [])
+const sheetBlocks = computed(() =>
+  customerReport.value?.blocks.filter((b) => b.sheetIndex === activeSheet.value) ?? [],
+)
+const customerColor = (id: string) => customerReport.value?.colors[id] ?? '#9aa6b4'
+const stepRoles = computed(() => {
+  const map = new Map<number, Set<string>>()
+  for (const c of customerReport.value?.cuts ?? []) {
+    if (c.sheetIndex !== activeSheet.value) continue
+    if (activeCustomer.value && c.customerId !== activeCustomer.value) continue
+    const set = map.get(c.stepIndex) ?? new Set<string>()
+    set.add(c.role)
+    map.set(c.stepIndex, set)
+  }
+  return map
+})
 const totalSteps = computed(() => steps.value.length)
 
 const thumbs = computed(() => {
@@ -35,9 +52,9 @@ const scale = computed(() => {
 function describe(s: CutStep | undefined, i: number) {
   if (!s) return ''
   if (s.axis === 'v') {
-    return `第 ${i + 1} 刀：竖切 x = ${s.at.toFixed(1)}mm，从 y=${s.from.toFixed(1)} 贯通到 y=${s.to.toFixed(1)}（长 ${(s.to - s.from).toFixed(1)}mm）`
+    return `第 ${i + 1} 刀：竖切 x = ${s.at.toFixed(2)}mm，从 y=${s.from.toFixed(2)} 贯通到 y=${s.to.toFixed(2)}（长 ${(s.to - s.from).toFixed(2)}mm）`
   }
-  return `第 ${i + 1} 刀：横切 y = ${s.at.toFixed(1)}mm，从 x=${s.from.toFixed(1)} 贯通到 x=${s.to.toFixed(1)}（长 ${(s.to - s.from).toFixed(1)}mm）`
+  return `第 ${i + 1} 刀：横切 y = ${s.at.toFixed(2)}mm，从 x=${s.from.toFixed(2)} 贯通到 x=${s.to.toFixed(2)}（长 ${(s.to - s.from).toFixed(2)}mm）`
 }
 
 function togglePlay() {
@@ -89,8 +106,27 @@ const allStepsText = computed(() => {
       lines.push(`  ${describe({ ...c, sheetIndex: s.index }, i)}`)
     })
   }
+  if (customerReport.value) {
+    lines.push('')
+    lines.push('【按客户拆分的取件包；统一使用上面的合并切割步骤编号】')
+    for (const p of customerReport.value.packages) {
+      lines.push(`客户「${p.customerName}」：${p.photoCount} 张，块 ${p.blocks.map((b) => b.id).join('、')}`)
+      for (const c of p.cuts) {
+        const role = c.role === 'boundary' ? '分户边界' : c.role === 'shared' ? '分户+内部' : '内部'
+        lines.push(`  第${c.sheetIndex + 1}张 第${c.stepIndex + 1}刀（${role}）`)
+      }
+    }
+  }
   return lines.join('\n')
 })
+
+function roleBadge(i: number) {
+  const roles = stepRoles.value.get(i)
+  if (!roles) return ''
+  if (roles.has('shared')) return '分户+内部'
+  if (roles.has('boundary')) return '分户边界'
+  return '客户内部'
+}
 
 function printList() {
   window.print()
@@ -154,12 +190,47 @@ function goto(routeName: string) {
               :done-count="step"
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :customer-blocks="sheetBlocks"
+              :customer-color-of="customerColor"
+              :show-customer-blocks="!!customerReport"
+              :active-customer-id="activeCustomer"
             />
           </div>
         </div>
       </div>
 
       <div class="stack">
+        <div v-if="customerReport" class="card">
+          <h3>分户取件包</h3>
+          <div class="card-sub">先按彩色分户边界裁成独立块，再执行各包内部刀</div>
+          <div class="legend">
+            <a
+              class="badge"
+              href="#"
+              :style="!activeCustomer ? { background: '#1f2733', color: '#fff' } : {}"
+              @click.prevent="activeCustomer = ''"
+            >全部</a>
+            <a
+              v-for="p in customerReport.packages"
+              :key="p.customerId"
+              class="badge"
+              href="#"
+              :style="activeCustomer === p.customerId ? { background: p.color, color: '#fff', borderColor: p.color } : { color: p.color, borderColor: p.color }"
+              @click.prevent="activeCustomer = activeCustomer === p.customerId ? '' : p.customerId"
+            >{{ p.customerName }} · {{ p.cuts.length }}刀</a>
+          </div>
+          <table class="data" style="margin-top: 10px">
+            <thead><tr><th>客户</th><th>独立块</th><th class="num">照片</th></tr></thead>
+            <tbody>
+              <tr v-for="p in customerReport.packages" :key="p.customerId">
+                <td :style="{ color: p.color, fontWeight: 700 }">{{ p.customerName }}</td>
+                <td>{{ p.blocks.map((b) => b.id).join('、') }}</td>
+                <td class="num">{{ p.photoCount }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
         <div class="card">
           <h3>播放控制</h3>
           <div class="row">
@@ -192,6 +263,7 @@ function goto(routeName: string) {
               <span class="idx">{{ i + 1 }}</span>
               <span>{{ describe(c, i) }}</span>
               <span v-if="c.merged" class="badge ok">共边合并</span>
+              <span v-if="roleBadge(i)" class="badge brand">{{ roleBadge(i) }}</span>
             </div>
           </div>
         </div>

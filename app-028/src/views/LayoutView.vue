@@ -14,6 +14,9 @@ import {
   setManual,
   sheetsOf,
   photoVersion,
+  customerReportOf,
+  assignCustomers,
+  runPack,
 } from '../store'
 import { comparePapers, computeCost } from '../logic/cost'
 import { findPhotoSize, groupsFromTask, resolvePaper, sizeLabel } from '../logic/library'
@@ -32,7 +35,23 @@ const localMsg = ref('')
 
 const paper = computed(() => (task.value ? resolvePaper(task.value, allPapers.value) : allPapers.value[0]))
 const sheets = computed(() => (task.value ? sheetsOf(task.value) : []))
+const customerReport = computed(() => (task.value ? customerReportOf(task.value) : undefined))
+const activeCustomer = ref('')
+const labelCustomer = ref('')
+const labelItemId = ref('')
+const labelScope = ref<'item' | 'photo'>('item')
 const sheet = computed(() => sheets.value[Math.min(activeSheet.value, Math.max(0, sheets.value.length - 1))])
+const sheetBlocks = computed(() =>
+  customerReport.value?.blocks.filter((b) => b.sheetIndex === activeSheet.value) ?? [],
+)
+const blockBySeq = computed(() => {
+  const map = new Map<number, (typeof sheetBlocks.value)[number]>()
+  for (const b of sheetBlocks.value) for (const seq of b.placementSeqs) map.set(seq, b)
+  return map
+})
+const customerColor = (id: string) => customerReport.value?.colors[id]
+const showCustomers = computed(() => (customerReport.value?.customerIds.length ?? 0) > 0)
+const hasUnassigned = computed(() => customerReport.value?.customerIds.includes('__unassigned__') ?? false)
 const cost = computed(() => (task.value?.result ? computeCost(paper.value, task.value.result) : undefined))
 const totalPhotos = computed(() =>
   sheets.value.reduce((acc, s) => acc + s.placements.length, 0),
@@ -210,6 +229,52 @@ function doReset() {
   selectedSeq.value = -1
 }
 
+function applyCustomerLabel() {
+  const t = task.value
+  if (!t) return
+  const name = labelCustomer.value.trim()
+  if (!name) {
+    localMsg.value = '请先填写客户名'
+    return
+  }
+  const assignments =
+    labelScope.value === 'photo' && selectedSeq.value >= 0
+      ? [{ seq: selectedSeq.value, customerId: name, scope: 'photo' as const }]
+      : t.items
+          .filter((item) => !labelItemId.value || item.id === labelItemId.value)
+          .map((item) => ({
+            itemId: item.id,
+            customerId: name,
+            scope: 'item' as const,
+            onlyUnassigned: true,
+          }))
+  assignCustomers(t, assignments)
+  activeCustomer.value = name
+  selectedSeq.value = labelScope.value === 'photo' ? selectedSeq.value : -1
+  localMsg.value =
+    labelScope.value === 'photo'
+      ? `已把 #${selectedSeq.value} 补标给「${name}」，并沿用原刀路重算分户块`
+      : `已把当前所有清单补标给「${name}」；若有多个客户，请继续补标后重排`
+}
+
+function markSelectedCustomer() {
+  const t = task.value
+  if (!t || selectedSeq.value < 0) {
+    localMsg.value = '请先点选一张照片，再补标该张'
+    return
+  }
+  labelScope.value = 'photo'
+  applyCustomerLabel()
+}
+
+function rerunMerged() {
+  const t = task.value
+  if (!t) return
+  t.mergeCustomers = true
+  const err = runPack(t)
+  localMsg.value = err ? `整批已停止：${err}` : '已按最新客户标记重新合并拼版'
+}
+
 function registerWaste(w: number, h: number) {
   const t = task.value
   if (!t) return
@@ -275,6 +340,7 @@ watch(
       <span class="badge brand">{{ paper.name }} {{ paper.wMm }}×{{ paper.hMm }}mm</span>
       <span class="badge">{{ totalPhotos }} 张照片</span>
       <span class="badge">{{ sheets.length }} 张相纸</span>
+      <span v-if="customerReport" class="badge brand">{{ customerReport.customerIds.length }} 客户合并</span>
       <span class="badge">{{ totalSteps }} 刀（未合并 {{ rawSteps }} 刀）</span>
       <div class="spacer"></div>
       <button class="btn" @click="goto('cut')">裁切步骤 →</button>
@@ -321,6 +387,10 @@ watch(
               draggable
               :show-cut-labels="true"
               :thumb-of="thumbs"
+              :customer-blocks="sheetBlocks"
+              :customer-color-of="customerColor"
+              :show-customer-blocks="showCustomers"
+              :active-customer-id="activeCustomer"
               @move="onMove"
               @moveend="onMoveEnd"
               @select="(seq) => (selectedSeq = seq)"
@@ -340,6 +410,7 @@ watch(
             <thead>
               <tr>
                 <th class="num">编号</th>
+                <th>客户</th>
                 <th>尺寸</th>
                 <th class="num">位置 x/y mm</th>
                 <th class="num">宽×高 mm</th>
@@ -350,6 +421,18 @@ watch(
               <tr v-for="p in displaySheet?.placements ?? []" :key="p.seq">
                 <td class="num">#{{ p.seq }}</td>
                 <td>
+                  <span
+                    v-if="customerReport"
+                    class="badge"
+                    :style="{
+                      color: customerColor(blockBySeq.get(p.seq)?.customerId ?? p.customerId ?? '__unassigned__'),
+                      border: `1px solid ${customerColor(blockBySeq.get(p.seq)?.customerId ?? p.customerId ?? '__unassigned__')}`,
+                    }"
+                  >
+                    {{ blockBySeq.get(p.seq)?.customerName ?? '未补标' }}
+                  </span>
+                </td>
+                <td>
                   {{
                     sizeLabel(
                       findPhotoSize(
@@ -359,8 +442,8 @@ watch(
                     )
                   }}
                 </td>
-                <td class="num">{{ p.x.toFixed(1) }} / {{ p.y.toFixed(1) }}</td>
-                <td class="num">{{ p.w.toFixed(1) }}×{{ p.h.toFixed(1) }}</td>
+                <td class="num">{{ p.x.toFixed(2) }} / {{ p.y.toFixed(2) }}</td>
+                <td class="num">{{ p.w.toFixed(2) }}×{{ p.h.toFixed(2) }}</td>
                 <td>{{ p.rotated ? '90°' : '—' }}</td>
               </tr>
             </tbody>
@@ -369,6 +452,93 @@ watch(
       </div>
 
       <div class="stack">
+        <div v-if="customerReport" class="card">
+          <h3>
+            合并分户与取舍
+            <span class="badge brand">{{ customerReport.customerIds.length }} 个客户</span>
+          </h3>
+          <div class="note">{{ customerReport.rule }}</div>
+          <div class="kv" style="margin-top: 10px">
+            <dt>分开排基线</dt>
+            <dd>{{ customerReport.baselineSheets }} 张 / {{ formatCents(customerReport.baselineCents) }}（照片面积利用率 {{ formatPercent(customerReport.baselineUtilization) }}）</dd>
+            <dt>合并排样</dt>
+            <dd>{{ customerReport.mergedSheets }} 张 / {{ formatCents(customerReport.mergedCents) }}（{{ formatPercent(customerReport.mergedUtilization) }}）</dd>
+            <dt>节省</dt>
+            <dd>{{ customerReport.savedSheets }} 张纸 / {{ formatCents(customerReport.savedCents) }}</dd>
+          </div>
+          <div class="legend" style="margin-top: 10px">
+            <a
+              v-for="p in customerReport.packages"
+              :key="p.customerId"
+              class="badge"
+              href="#"
+              :style="{
+                color: activeCustomer === p.customerId ? '#fff' : p.color,
+                background: activeCustomer === p.customerId ? p.color : undefined,
+                border: `1px solid ${p.color}`,
+              }"
+              @click.prevent="activeCustomer = activeCustomer === p.customerId ? '' : p.customerId"
+            >
+              {{ p.customerName }} {{ p.photoCount }}张 / {{ p.blocks.length }}块
+            </a>
+          </div>
+          <table class="data" style="margin-top: 10px">
+            <thead>
+              <tr>
+                <th>取件包</th>
+                <th>用纸位置（切块边界，0.01mm）</th>
+                <th class="num">张数</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in customerReport.packages" :key="p.customerId">
+                <td :style="{ color: p.color, fontWeight: 700 }">{{ p.customerName }}</td>
+                <td>
+                  <span v-for="b in p.blocks" :key="b.id" class="mono" style="display: block; font-size: 11.5px">
+                    第{{ b.sheetIndex + 1 }}张 {{ b.id }}：x={{ b.x }}, y={{ b.y }}, {{ b.w }}×{{ b.h }}mm，{{ b.photoCount }}张
+                  </span>
+                </td>
+                <td class="num">{{ p.sheets.length }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <table v-if="customerReport.handoffs.length" class="data" style="margin-top: 10px">
+            <thead><tr><th>独占纸</th><th>边角让出判据</th></tr></thead>
+            <tbody>
+              <tr v-for="h in customerReport.handoffs" :key="h.sheetIndex">
+                <td>第{{ h.sheetIndex + 1 }}张 · {{ h.customerName }}</td>
+                <td style="font-size: 12px">{{ h.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div v-if="hasUnassigned" class="card">
+          <h3>旧任务补标</h3>
+          <div class="card-sub">可先保留已排好的刀路补客户名；补完多个客户后点重排才会重新凑边角省纸。</div>
+          <div class="row">
+            <label class="field" style="max-width: 220px">
+              客户名
+              <input v-model="labelCustomer" list="layout-customer-names" type="text" placeholder="如 王女士" />
+            </label>
+            <label class="field" style="max-width: 240px">
+              补标范围
+              <select v-model="labelItemId">
+                <option value="">整单所有未分类照片</option>
+                <option v-for="item in task.items" :key="item.id" :value="item.id">
+                  清单行：{{ findPhotoSize(allSizes, item.sizeId)?.name ?? '自定义' }} ×{{ item.qty }}
+                </option>
+              </select>
+            </label>
+            <datalist id="layout-customer-names">
+              <option v-for="p in customerReport?.packages.filter((x) => x.customerId !== '__unassigned__') ?? []" :key="p.customerId" :value="p.customerName" />
+            </datalist>
+            <button class="btn" @click="labelScope = 'item'; applyCustomerLabel()">整单补给此客户</button>
+            <button class="btn" :disabled="selectedSeq < 0" @click="markSelectedCustomer">只标选中照片</button>
+            <button class="btn primary" @click="rerunMerged">按标记重排</button>
+          </div>
+        </div>
+
         <div class="card">
           <h3>利用率与张数</h3>
           <UtilizationBar
@@ -452,9 +622,9 @@ watch(
               <dt>选中</dt>
               <dd>#{{ info.p.seq }} {{ info.size?.name }}</dd>
               <dt>位置</dt>
-              <dd>{{ info.p.x.toFixed(1) }} / {{ info.p.y.toFixed(1) }} mm</dd>
+              <dd>{{ info.p.x.toFixed(2) }} / {{ info.p.y.toFixed(2) }} mm</dd>
               <dt>尺寸</dt>
-              <dd>{{ info.p.w.toFixed(1) }}×{{ info.p.h.toFixed(1) }} mm</dd>
+              <dd>{{ info.p.w.toFixed(2) }}×{{ info.p.h.toFixed(2) }} mm</dd>
             </div>
             <div class="row">
               <button class="btn small" @click="rotateSelected">旋转 90°</button>

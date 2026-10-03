@@ -1,7 +1,7 @@
 /** 1:1 位图导出（canvas 直绘，尺寸 = mm / 25.4 × dpi，同一物理尺寸在不同 DPI 下 mm 不变） */
 import { loadImage } from './image'
 import { mmToPx } from './units'
-import type { Paper, Placement, Sheet, Task } from './types'
+import type { CustomerMergeReport, Paper, Placement, Sheet, Task } from './types'
 
 export interface PngBuildInput {
   task: Task
@@ -10,6 +10,7 @@ export interface PngBuildInput {
   dpi: number
   photoOf: (p: Placement) => { key: string; url: string } | undefined
   sizeLabelOf: (p: Placement) => string
+  customerReport?: CustomerMergeReport
   /** 纸张外侧留出的标注带宽度（mm），保证校验尺与裁切标记不被裁掉 */
   borderMm?: number
 }
@@ -58,6 +59,26 @@ export async function buildSheetPng(input: PngBuildInput): Promise<Blob> {
   ctx.lineWidth = Math.max(1, 0.15 * k)
   ctx.strokeRect(X(inset), Y(inset), (paper.wMm - 2 * inset) * k, (paper.hMm - 2 * inset) * k)
   ctx.restore()
+
+  // 客户独立取件块
+  for (const b of input.customerReport?.blocks.filter((x) => x.sheetIndex === sheet.index) ?? []) {
+    const color = input.customerReport?.colors[b.customerId] ?? '#2563eb'
+    ctx.save()
+    ctx.strokeStyle = color
+    ctx.lineWidth = Math.max(2, 0.55 * k)
+    ctx.strokeRect(X(b.x), Y(b.y), b.w * k, b.h * k)
+    ctx.fillStyle = color
+    ctx.font = `${Math.max(8, 2.8 * k)}px system-ui, "PingFang SC", "Microsoft YaHei", sans-serif`
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    const label = `${b.customerName} ${b.photoCount}`
+    ctx.fillStyle = 'rgba(255,255,255,.9)'
+    const tw = ctx.measureText(label).width
+    ctx.fillRect(X(b.x + 0.8 * k), Y(b.y + 0.8 * k), tw + 5 * k, 4.2 * k)
+    ctx.fillStyle = color
+    ctx.fillText(label, X(b.x + 1.05 * k), Y(b.y + 1.05 * k))
+    ctx.restore()
+  }
 
   // 照片
   for (const p of sheet.placements) {

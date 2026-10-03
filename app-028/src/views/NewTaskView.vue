@@ -42,6 +42,7 @@ const draft = reactive({
   kerfMm: settings.value.kerfMm,
   safeEdgeMm: settings.value.safeEdgeMm,
   allowRotate: settings.value.allowRotate,
+  mergeCustomers: true,
   headerText: '',
   footerText: '',
 })
@@ -71,6 +72,10 @@ const usableText = computed(() => {
 })
 
 const totalQty = computed(() => draft.items.reduce((a, i) => a + Math.max(0, i.qty), 0))
+const customerNames = computed(() =>
+  Array.from(new Set(draft.items.map((i) => i.customerId?.trim()).filter((v): v is string => !!v))).sort(),
+)
+const customerCount = computed(() => customerNames.value.length)
 
 function addItem(sizeId?: string) {
   const size = sizeId ?? allSizes.value[0]?.id
@@ -83,6 +88,7 @@ function addItem(sizeId?: string) {
     rotateAllowed: s?.rotateByDefault ?? false,
     repeatSamePhoto: true,
     keepTogether: false,
+    customerId: '',
   })
 }
 
@@ -205,6 +211,7 @@ function submit() {
     kerfMm: draft.kerfMm,
     safeEdgeMm: draft.safeEdgeMm,
     allowRotate: draft.allowRotate,
+    mergeCustomers: draft.mergeCustomers,
     headerText: draft.headerText,
     footerText: draft.footerText,
   })
@@ -232,6 +239,7 @@ function taskPaperName(t: Task) {
       <h1 style="margin: 0">新建拼版任务</h1>
       <span class="badge brand">相纸 + 照片清单</span>
       <div class="spacer"></div>
+      <span class="badge">{{ customerCount || 1 }} 个客户</span>
       <span class="badge">共 {{ totalQty }} 张照片</span>
     </div>
 
@@ -352,12 +360,16 @@ function taskPaperName(t: Task) {
             </span>
           </h3>
           <div class="card-sub">
-            尺寸库为毫米；底片只在浏览器内存里读尺寸与方向，不上传服务器
+            尺寸库为毫米；同一格填客户名即可合并拼版，底片只在浏览器内存里读取，不上传服务器
           </div>
+          <datalist id="customer-names">
+            <option v-for="name in customerNames" :key="name" :value="name"></option>
+          </datalist>
           <div v-if="!draft.items.length" class="note">还没有照片，点「+ 添加一行」或直接套用下方证件照模板</div>
           <table v-else class="data">
             <thead>
               <tr>
+                <th>客户</th>
                 <th>照片尺寸</th>
                 <th class="num" style="width: 76px">数量</th>
                 <th>旋转</th>
@@ -369,6 +381,15 @@ function taskPaperName(t: Task) {
             </thead>
             <tbody>
               <tr v-for="item in draft.items" :key="item.id">
+                <td>
+                  <input
+                    v-model="item.customerId"
+                    type="text"
+                    list="customer-names"
+                    placeholder="客户名"
+                    style="min-width: 110px"
+                  />
+                </td>
                 <td>
                   <select v-model="item.sizeId" @change="onSizeChange(item)">
                     <option v-for="s in allSizes" :key="s.id" :value="s.id">
@@ -462,7 +483,14 @@ function taskPaperName(t: Task) {
               任务名称
               <input v-model="draft.name" type="text" placeholder="可留空自动命名" />
             </label>
+            <label class="check" style="align-self: end; padding-bottom: 8px">
+              <input v-model="draft.mergeCustomers" type="checkbox" />
+              多客户合并拼版，再按合并切割步骤分户
+            </label>
             <button class="btn primary" @click="submit">排样并预览 →</button>
+          </div>
+          <div class="note">
+            取舍：取件包只认合并后的贯通切割树；各客户单独排样只用来对比省纸，不能从那套未印刷刀路算出另一组实体取件包。
           </div>
         </div>
 

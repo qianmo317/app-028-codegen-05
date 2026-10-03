@@ -57,6 +57,8 @@ interface Candidate {
   at: number
   aRects: Rect[]
   bRects: Rect[]
+  aIdx: number[]
+  bIdx: number[]
   aRegion: Rect
   bRegion: Rect
   edgeCount: number
@@ -96,12 +98,19 @@ function buildCandidates(region: Rect, rects: Rect[]): Candidate[] {
       if (spans) continue
       const a: Rect[] = []
       const b: Rect[] = []
-      for (const r of rects) {
+      const aIdx: number[] = []
+      const bIdx: number[] = []
+      rects.forEach((r, i) => {
         const lo = axis === 'v' ? r.x : r.y
         const hi = lo + (axis === 'v' ? r.w : r.h)
-        if (hi <= at + EPS) a.push(r)
-        else if (lo >= at - EPS) b.push(r)
-      }
+        if (hi <= at + EPS) {
+          a.push(r)
+          aIdx.push(i)
+        } else if (lo >= at - EPS) {
+          b.push(r)
+          bIdx.push(i)
+        }
+      })
       if (a.length + b.length !== rects.length) continue
       const aRegion: Rect =
         axis === 'v'
@@ -122,6 +131,8 @@ function buildCandidates(region: Rect, rects: Rect[]): Candidate[] {
         at,
         aRects: a,
         bRects: b,
+        aIdx,
+        bIdx,
         aRegion,
         bRegion,
         edgeCount,
@@ -145,44 +156,105 @@ function candidateScore(c: Candidate): number[] {
   ]
 }
 
-/** 只剩一张照片时，用修边刀把废料切掉，保证照片被完整分出 */
-function trimCuts(region: Rect, r: Rect): CutLine[] {
-  const out: CutLine[] = []
-  let cur: Rect = { ...region }
-  if (r.y > cur.y + EPS) {
-    out.push({ axis: 'h', at: r.y, from: cur.x, to: cur.x + cur.w })
-    cur = { x: cur.x, y: r.y, w: cur.w, h: cur.y + cur.h - r.y }
-  }
-  if (r.y + r.h < cur.y + cur.h - EPS) {
-    out.push({ axis: 'h', at: r.y + r.h, from: cur.x, to: cur.x + cur.w })
-    cur = { ...cur, h: r.h }
-  }
-  if (r.x > cur.x + EPS) {
-    out.push({ axis: 'v', at: r.x, from: cur.y, to: cur.y + cur.h })
-    cur = { x: r.x, y: cur.y, w: cur.x + cur.w - r.x, h: cur.h }
-  }
-  if (r.x + r.w < cur.x + cur.w - EPS) {
-    out.push({ axis: 'v', at: r.x + r.w, from: cur.y, to: cur.y + cur.h })
-    cur = { ...cur, w: r.w }
-  }
-  return out
-}
-
 /** 递归二分（guillotine split）拆解，返回贯通切割线序列；不可拆解时返回 null */
 export function decompose(
   region: Rect,
   rects: Rect[],
   budget: { n: number } = { n: 60000 },
 ): CutLine[] | null {
+  return guillotineTreeToCuts(buildGuillotineTree(region, rects, budget))
+}
+
+export interface CutTreeNode {
+  r: Rect
+  /** 叶节点上的切块序号；空数组表示废料叶 */
+  idx: number[]
+  axis?: CutAxis
+  at?: number
+  children?: CutTreeNode[]
+}
+
+function leaf(r: Rect, idx: number[] = []): CutTreeNode {
+  return { r, idx }
+}
+
+/** 单张照片的修边树，切割顺序与 trimCuts 保持一致，并把废料也保留成叶节点 */
+function trimTree(region: Rect, r: Rect, idx: number): CutTreeNode | null {
+  let node: CutTreeNode = leaf(r, [idx])
+  if (r.x + r.w < region.x + region.w - EPS) {
+    const stripX = r.x
+    const stripRight = region.x + region.w
+    node = {
+      r: { x: stripX, y: node.r.y, w: stripRight - stripX, h: node.r.h },
+      idx: [],
+      axis: 'v',
+      at: r.x + r.w,
+      children: [node, leaf({ x: r.x + r.w, y: node.r.y, w: region.x + region.w - r.x - r.w, h: node.r.h })],
+    }
+  }
+  if (r.x > region.x + EPS) {
+    node = {
+      r: { x: region.x, y: node.r.y, w: region.w, h: node.r.h },
+      idx: [],
+      axis: 'v',
+      at: r.x,
+      children: [leaf({ x: region.x, y: node.r.y, w: r.x - region.x, h: node.r.h }), node],
+    }
+  }
+  const stripX = node.r.x
+  const stripW = node.r.w
+  if (r.y + r.h < region.y + region.h - EPS) {
+    node = {
+      r: { x: stripX, y: node.r.y, w: stripW, h: region.y + region.h - node.r.y },
+      idx: [],
+      axis: 'h',
+      at: r.y + r.h,
+      children: [node, leaf({ x: stripX, y: r.y + r.h, w: stripW, h: region.y + region.h - r.y - r.h })],
+    }
+  }
+  if (r.y > region.y + EPS) {
+    node = {
+      r: { x: stripX, y: region.y, w: stripW, h: region.y + region.h - region.y },
+      idx: [],
+      axis: 'h',
+      at: r.y,
+      children: [leaf({ x: stripX, y: region.y, w: stripW, h: r.y - region.y }), node],
+    }
+  }
+  node.r = { ...region }
+  return node
+}
+
+/** 递归二分解构为可遍历的切割树；不可拆解时返回 null */
+export function buildGuillotineTree(
+  region: Rect,
+  rects: Rect[],
+  budget: { n: number } = { n: 60000 },
+  globalIndexes?: number[],
+  splitMode: 'photo' | 'customer' = 'photo',
+  globalMeta?: string[],
+): CutTreeNode | null {
+  const indexes = globalIndexes ?? rects.map((_, i) => i)
+  const meta = globalMeta ?? rects.map(() => '')
   for (const r of rects) {
     if (!rectContains(region, r)) return null
   }
-  if (rects.length === 0) return []
-  if (rects.length === 1) return trimCuts(region, rects[0])
+  if (rects.length === 0) return leaf(region)
+  if (rects.length === 1) {
+    const local = rects.findIndex((r) => rectsEqual(r, rects[0]))
+    return trimTree(region, rects[0], local < 0 ? indexes[0] : indexes[local])
+  }
   const cands = buildCandidates(region, rects)
+  const scoreCustomer = (c: Candidate): number[] => {
+    const pure = (idx: number[]) => new Set(idx.map((i) => meta[i])).size
+    const aPure = c.aIdx.length && pure(c.aIdx) === 1 ? 0 : 1
+    const bPure = c.bIdx.length && pure(c.bIdx) === 1 ? 0 : 1
+    return [aPure + bPure, candidateScore(c)[1], -c.edgeCount, c.areaSum]
+  }
+  const scorer = splitMode === 'customer' ? scoreCustomer : candidateScore
   cands.sort((p, q) => {
-    const sp = candidateScore(p)
-    const sq = candidateScore(q)
+    const sp = scorer(p)
+    const sq = scorer(q)
     for (let i = 0; i < sp.length; i++) {
       if (sp[i] !== sq[i]) return sp[i] - sq[i]
     }
@@ -190,17 +262,51 @@ export function decompose(
   })
   for (const c of cands) {
     if (budget.n-- <= 0) return null
-    const a = decompose(c.aRegion, c.aRects, budget)
+    const aIndexes: number[] = []
+    const bIndexes: number[] = []
+    const aMeta: string[] = []
+    const bMeta: string[] = []
+    rects.forEach((r, i) => {
+      const lo = c.axis === 'v' ? r.x : r.y
+      const hi = lo + (c.axis === 'v' ? r.w : r.h)
+      if (hi <= c.at + EPS) {
+        aIndexes.push(indexes[i])
+        aMeta.push(meta[i])
+      } else if (lo >= c.at - EPS) {
+        bIndexes.push(indexes[i])
+        bMeta.push(meta[i])
+      }
+    })
+    const a = buildGuillotineTree(c.aRegion, c.aRects, budget, aIndexes, splitMode, aMeta)
     if (!a) continue
-    const b = decompose(c.bRegion, c.bRects, budget)
+    const b = buildGuillotineTree(c.bRegion, c.bRects, budget, bIndexes, splitMode, bMeta)
     if (!b) continue
-    const cut: CutLine =
-      c.axis === 'v'
-        ? { axis: 'v', at: c.at, from: region.y, to: region.y + region.h }
-        : { axis: 'h', at: c.at, from: region.x, to: region.x + region.w }
-    return [cut, ...a, ...b]
+    return {
+      r: { ...region },
+      idx: indexes,
+      axis: c.axis,
+      at: c.at,
+      children: [a, b],
+    }
   }
   return null
+}
+
+export function guillotineTreeToCuts(root: CutTreeNode | null): CutLine[] | null {
+  if (!root) return null
+  const out: CutLine[] = []
+  const walk = (n: CutTreeNode) => {
+    if (n.axis && n.at !== undefined && n.children?.length === 2) {
+      out.push(
+        n.axis === 'v'
+          ? { axis: 'v', at: n.at, from: n.r.y, to: n.r.y + n.r.h }
+          : { axis: 'h', at: n.at, from: n.r.x, to: n.r.x + n.r.w },
+      )
+      n.children.forEach(walk)
+    }
+  }
+  walk(root)
+  return out
 }
 
 /** 共边合并：同一坐标上相接/重叠的切割线合成一条 */

@@ -5,7 +5,7 @@
  */
 import { imageToJpeg, renderTextBlock, renderTextStrip, type RasterImage } from './image'
 import { MM_TO_PT } from './units'
-import type { Paper, Placement, Sheet, Task } from './types'
+import type { CustomerMergeReport, Paper, Placement, Sheet, Task } from './types'
 
 const S = MM_TO_PT
 
@@ -13,6 +13,13 @@ const n2 = (v: number) => (Math.abs(v) < 0.005 ? '0' : v.toFixed(2))
 const asciiOnly = (s: string) => s.replace(/[^\x20-\x7E]/g, '')
 const hasNonAscii = (s: string) => /[^\x20-\x7E]/.test(s)
 const pdfEscape = (s: string) => s.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)')
+
+function hexToRgb(hex: string): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!m) return '0.15 0.39 0.92'
+  const n = parseInt(m[1], 16)
+  return `${((n >> 16) & 255) / 255} ${((n >> 8) & 255) / 255} ${(n & 255) / 255}`
+}
 
 function ascii(s: string): Uint8Array {
   const out = new Uint8Array(s.length)
@@ -31,6 +38,7 @@ export interface PdfBuildInput {
   sheets: Sheet[]
   photoOf: (p: Placement) => PdfPhotoRef | undefined
   sizeLabelOf: (p: Placement) => string
+  customerReport?: CustomerMergeReport
   maxPhotos?: number
   onProgress?: (msg: string) => void
 }
@@ -107,6 +115,20 @@ async function buildSheetPage(
     } else {
       body.push(text(px(W / 2), py(yMm + sizeMm) + sizeMm * 0.2 * S, txt, sizeMm * S * 0.9, false, true))
     }
+  }
+
+  // 客户独立取件块（边界与预览/CSV 同一 0.01mm 坐标）
+  const blocks = input.customerReport?.blocks.filter((b) => b.sheetIndex === sheet.index) ?? []
+  for (const b of blocks) {
+    const color = input.customerReport?.colors[b.customerId] ?? '#2563eb'
+    const rgb = hexToRgb(color)
+    body.push(`q 1.2 w ${rgb} RG`)
+    body.push(`${n2(px(b.x))} ${n2(py(b.y + b.h))} ${n2(px(b.w))} ${n2(px(b.h))} re S Q`)
+    const label = `${b.customerName} ${b.photoCount}`
+    const sizeMm = 2.8
+    const strip = await renderTextStrip(label, sizeMm, 300)
+    const labelWidth = Math.min(strip.wMm, Math.max(8, b.w - 1.6))
+    addImage(strip.image, b.x + 0.8, b.y + 0.8, labelWidth, sizeMm)
   }
 
   // 照片
@@ -213,7 +235,19 @@ async function buildInfoPage(input: PdfBuildInput): Promise<PageSpec> {
   lines.push(
     `隙距 ${input.task.gapMm}mm｜刀宽补偿 ${input.task.kerfMm}mm｜安全边 ${input.task.safeEdgeMm}mm｜共 ${input.sheets.length} 张相纸`,
   )
-  lines.push('')
+  if (input.customerReport) {
+    lines.push(`分户原则：${input.customerReport.rule}`)
+    lines.push(
+      `分开排 ${input.customerReport.baselineSheets} 张/${input.customerReport.baselineCents / 100}元；合并排 ${input.customerReport.mergedSheets} 张/${input.customerReport.mergedCents / 100}元；节省 ${input.customerReport.savedSheets} 张/${input.customerReport.savedCents / 100}元`,
+    )
+    for (const p of input.customerReport.packages) {
+      lines.push(`客户「${p.customerName}」${p.photoCount}张：${p.blocks.map((b) => `${b.id}(${b.placementSeqs.length}张)`).join('、')}`)
+    }
+    for (const h of input.customerReport.handoffs) {
+      lines.push(`  第${h.sheetIndex + 1}张边角判据：${h.reason}`)
+    }
+    lines.push('')
+  }
   for (const s of input.sheets) {
     lines.push(`【第 ${s.index + 1} 张】共 ${s.cutSteps.length} 刀（未合并 ${s.rawCutCount} 刀）`)
     s.cutSteps.forEach((c, i) => {

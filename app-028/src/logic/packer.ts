@@ -9,6 +9,8 @@ import type { PackResult, PackStats, Placement, Sheet, WasteRect } from './types
 
 export interface PackGroup {
   itemId: string
+  customerId?: string
+  customerName?: string
   copies: number
   photoW: number
   photoH: number
@@ -24,6 +26,8 @@ export interface PackOptions {
   gapMm: number
   kerfMm: number
   allowRotate: boolean
+  /** true 时先按客户、再按尺寸稳定排序，保证同一客户的块优先连续 */
+  customerMode?: boolean
 }
 
 export interface PackOutput {
@@ -33,6 +37,7 @@ export interface PackOutput {
 
 interface PlacedRaw {
   itemId: string
+  customerId?: string
   rect: Rect
   rotated: boolean
 }
@@ -255,10 +260,17 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
     .filter((g) => g.copies > 0)
     .map((g) => ({ ...g }))
     .sort((a, b) => {
+      if (opts.customerMode) {
+        const ca = a.customerId ?? ''
+        const cb = b.customerId ?? ''
+        if (ca !== cb) return ca < cb ? -1 : 1
+      }
       const ma = Math.max(a.photoW, a.photoH)
       const mb = Math.max(b.photoW, b.photoH)
       if (Math.abs(ma - mb) > EPS) return mb - ma
-      return b.photoW * b.photoH - a.photoW * a.photoH
+      const areaDiff = b.photoW * b.photoH - a.photoW * a.photoH
+      if (Math.abs(areaDiff) > EPS) return areaDiff
+      return a.itemId < b.itemId ? -1 : a.itemId > b.itemId ? 1 : 0
     })
 
   // 单张都放不下 -> 直接给出边界提示
@@ -272,7 +284,7 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
       (canRot && sh <= region.w + EPS && sw <= region.h + EPS)
     if (!ok) {
       oversize.push(
-        `${round(g.photoW, 1)}×${round(g.photoH, 1)}mm 放不进可用区 ${round(region.w, 1)}×${round(region.h, 1)}mm`,
+        `${g.customerName ? `客户「${g.customerName}」` : '未标客户'}：${round(g.photoW, 1)}×${round(g.photoH, 1)}mm 放不进可用区 ${round(region.w, 1)}×${round(region.h, 1)}mm`,
       )
     }
   }
@@ -291,14 +303,15 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
 
     const commit = (t: Trial, g: PackGroup) => {
       free = t.free
-      placements.push({ itemId: g.itemId, rect: t.placed, rotated: t.rotated })
+      placements.push({ itemId: g.itemId, customerId: g.customerId, rect: t.placed, rotated: t.rotated })
     }
 
     let progress = true
     while (progress) {
       progress = false
-      // 不拆散：若该组能整组放进空纸、却放不进当前剩余空间，则结束当前纸另起一张
-      if (placements.length > 0) {
+      // 不拆散：若该组能整组放进空纸、却放不进当前剩余空间，普通模式另起一张；
+      // 合并模式先让其它客户填边角，整张边角都不能再利用时自然另起一张。
+      if (placements.length > 0 && !opts.customerMode) {
         const blocked = queue.some(
           (g) =>
             g.copies > 1 &&
@@ -319,6 +332,16 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
       }
       for (const g of queue) {
         if (g.copies <= 0) continue
+        // 合并模式不能把「不拆散」组在边角处偷偷拆开；放不下就让给其它客户
+        if (
+          opts.customerMode &&
+          placements.length > 0 &&
+          g.copies > 1 &&
+          g.keepTogether &&
+          !tryPlaceMany(free, g, g.copies, opts, m)
+        ) {
+          continue
+        }
         let t = tryPlaceOne(free, g, opts, m)
         while (t) {
           commit(t, g)
@@ -332,7 +355,17 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
         free = free.filter((r) => r.w > 0.5 && r.h > 0.5)
       }
     }
-    if (placements.length === 0) break
+    if (placements.length === 0) {
+      const stuck = queue.filter((g) => g.copies > 0)
+      if (opts.customerMode && stuck.length) {
+        const names = Array.from(new Set(stuck.map((g) => g.customerName || '未标客户'))).slice(0, 5)
+        return {
+          error: `整批已停止：下一张空纸仍无法按 guillotine 放入任何剩余照片（客户：${names.join('、')}）。请减少同批数量、更换相纸或调小安全边`,
+          result: emptyResult(performance.now() - started),
+        }
+      }
+      break
+    }
     rawSheets.push({ placements })
   }
 
@@ -352,6 +385,7 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
       // 排样器放置的是「切块」（照片 + 刀宽/隙距补偿），这里换算回照片实际矩形
       rawPlacements.push({
         itemId: p.itemId,
+        customerId: p.customerId,
         sheetIndex: s,
         x: p.rect.x + m,
         y: p.rect.y + m,
@@ -366,6 +400,17 @@ export function pack(groups: PackGroup[], opts: PackOptions): PackOutput {
         sheetOfItem.set(p.itemId, set)
       }
       set.add(s)
+    }
+  }
+
+  if (opts.customerMode) {
+    const remaining = queue.filter((g) => g.copies > 0)
+    if (remaining.length) {
+      const names = Array.from(new Set(remaining.map((g) => g.customerName || '未标客户'))).slice(0, 5)
+      return {
+        error: `整批已停止：guillotine 余料无法继续放入剩余照片（客户：${names.join('、')}）。请减少同批数量、更换相纸或调小安全边`,
+        result: emptyResult(performance.now() - started),
+      }
     }
   }
 

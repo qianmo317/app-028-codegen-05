@@ -11,9 +11,10 @@ import {
   makeThumbResolver,
   photoVersion,
   sheetsOf,
+  customerReportOf,
 } from '../store'
 import { computeCost } from '../logic/cost'
-import { cutListRows, csvBlob } from '../logic/csv'
+import { customerCutRows, cutListRows, csvBlob } from '../logic/csv'
 import { downloadBlob } from '../logic/image'
 import { findPhotoSize, resolvePaper } from '../logic/library'
 import { buildPdf } from '../logic/pdf'
@@ -27,6 +28,7 @@ const router = useRouter()
 const task = computed<Task | undefined>(() => getTask(String(route.params.id)))
 const paper = computed(() => (task.value ? resolvePaper(task.value, allPapers.value) : allPapers.value[0]))
 const sheets = computed(() => (task.value ? sheetsOf(task.value) : []))
+const customerReport = computed(() => (task.value ? customerReportOf(task.value) : undefined))
 const valid = computed(() => !task.value?.manual || task.value.manual.valid)
 const cost = computed(() => (task.value?.result ? computeCost(paper.value, task.value.result) : undefined))
 const dpi = ref(300)
@@ -75,6 +77,7 @@ async function exportPdf() {
       sheets: sheets.value,
       photoOf: photoResolver(),
       sizeLabelOf,
+      customerReport: customerReport.value,
       onProgress: (m) => (message.value = m),
     })
     downloadBlob(blob, `${task.value!.name}-1to1.pdf`)
@@ -98,6 +101,7 @@ async function exportPng(index: number) {
       dpi: dpi.value,
       photoOf: photoResolver(),
       sizeLabelOf,
+      customerReport: customerReport.value,
     })
     downloadBlob(blob, `${task.value!.name}-sheet${index + 1}-${dpi.value}dpi.png`)
     message.value = `第 ${index + 1} 张 PNG 已导出（${dpi.value}dpi，1:1）`
@@ -141,9 +145,26 @@ function exportCutList() {
       if (p) return sizeLabelOf(p)
     }
     return ''
-  })
+  }, customerReport.value)
   downloadBlob(csvBlob(rows), `${task.value!.name}-切割清单.csv`)
   message.value = '切割清单 CSV 已导出'
+}
+
+function exportCustomerCuts() {
+  if (!guard()) return
+  if (!customerReport.value) {
+    message.value = '当前不是多客户合并任务'
+    return
+  }
+  const rows = customerCutRows(customerReport.value, (seq) => {
+    for (const s of sheets.value) {
+      const p = s.placements.find((x) => x.seq === seq)
+      if (p) return sizeLabelOf(p)
+    }
+    return ''
+  })
+  downloadBlob(csvBlob(rows), `${task.value!.name}-分户取件裁切清单.csv`)
+  message.value = '按客户分开的裁切清单 CSV 已导出'
 }
 
 function exportCost() {
@@ -163,12 +184,32 @@ function exportCost() {
     ['不排样逐张打印成本（元）', (c.naiveTotalCents / 100).toFixed(2)],
     ['不排样逐张打印浪费率', formatPercent(c.naiveWasteRate)],
     ['节省（元）', (c.savedCents / 100).toFixed(2)],
-    [],
-    ['照片编号', '所在相纸', '尺寸', '宽 mm', '高 mm', '旋转'],
   ]
+  if (customerReport.value) {
+    const r = customerReport.value
+    rows.push(
+      ['分开排基线张数', r.baselineSheets],
+      ['合并排样张数', r.mergedSheets],
+      ['合并省纸张数', r.savedSheets],
+      ['分开排基线成本（元）', (r.baselineCents / 100).toFixed(2)],
+      ['合并排样成本（元）', (r.mergedCents / 100).toFixed(2)],
+      ['合并相对分开排节省（元）', (r.savedCents / 100).toFixed(2)],
+    )
+  }
+  rows.push(
+    [],
+    customerReport.value
+      ? ['照片编号', '客户', '独立块', '所在相纸', '尺寸', '宽 mm', '高 mm', '旋转']
+      : ['照片编号', '所在相纸', '尺寸', '宽 mm', '高 mm', '旋转'],
+  )
   for (const s of sheets.value) {
     for (const p of s.placements) {
-      rows.push([p.seq, s.index + 1, sizeLabelOf(p), p.w, p.h, p.rotated ? '90°' : '无'])
+      if (customerReport.value) {
+        const b = customerReport.value.blocks.find((x) => x.placementSeqs.includes(p.seq))
+        rows.push([p.seq, b?.customerName ?? '', b?.id ?? '', s.index + 1, sizeLabelOf(p), p.w, p.h, p.rotated ? '90°' : '无'])
+      } else {
+        rows.push([p.seq, s.index + 1, sizeLabelOf(p), p.w, p.h, p.rotated ? '90°' : '无'])
+      }
     }
   }
   downloadBlob(csvBlob(rows), `${task.value!.name}-成本表.csv`)
@@ -225,6 +266,7 @@ function printView() {
             </div>
             <div class="row">
               <button class="btn" @click="exportCutList">导出切割清单 CSV</button>
+              <button class="btn" :disabled="!customerReport" @click="exportCustomerCuts">导出分户裁切清单</button>
               <button class="btn" @click="exportCost">导出成本表 CSV</button>
               <button class="btn" @click="printView">打印视图（含校验尺）</button>
             </div>
@@ -245,6 +287,39 @@ function printView() {
             <dt>含照片</dt>
             <dd>{{ sheets.reduce((a, s) => a + s.placements.length, 0) }} 张（有导入底片时嵌入）</dd>
           </div>
+        </div>
+
+        <div v-if="customerReport" class="card">
+          <h3>合并拼版分户账</h3>
+          <div class="note">{{ customerReport.rule }}</div>
+          <div class="kv" style="margin-top: 10px">
+            <dt>分开排</dt>
+            <dd>{{ customerReport.baselineSheets }} 张 / {{ formatCents(customerReport.baselineCents) }}</dd>
+            <dt>合并排</dt>
+            <dd>{{ customerReport.mergedSheets }} 张 / {{ formatCents(customerReport.mergedCents) }}</dd>
+            <dt>节省</dt>
+            <dd>{{ customerReport.savedSheets }} 张 / {{ formatCents(customerReport.savedCents) }}</dd>
+          </div>
+          <table class="data" style="margin-top: 10px">
+            <thead><tr><th>客户</th><th>用纸块</th><th class="num">照片</th><th class="num">刀数</th></tr></thead>
+            <tbody>
+              <tr v-for="p in customerReport.packages" :key="p.customerId">
+                <td :style="{ color: p.color, fontWeight: 700 }">{{ p.customerName }}</td>
+                <td>{{ p.blocks.map((b) => `第${b.sheetIndex + 1}张${b.id}`).join('、') }}</td>
+                <td class="num">{{ p.photoCount }}</td>
+                <td class="num">{{ p.cuts.length }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <table v-if="customerReport.handoffs.length" class="data" style="margin-top: 10px">
+            <thead><tr><th>独占纸</th><th>边角让出判据</th></tr></thead>
+            <tbody>
+              <tr v-for="h in customerReport.handoffs" :key="h.sheetIndex">
+                <td>第{{ h.sheetIndex + 1 }}张 · {{ h.customerName }}</td>
+                <td style="font-size: 12px">{{ h.reason }}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
 
         <div class="card">
@@ -284,6 +359,9 @@ function printView() {
               :safe-edge-mm="task.safeEdgeMm"
               :scale="Math.max(0.5, Math.min(2.2, 700 / paper.wMm))"
               :thumb-of="thumbs"
+              :customer-blocks="customerReport?.blocks.filter((b) => b.sheetIndex === s.index) ?? []"
+              :customer-color-of="(id) => customerReport?.colors[id]"
+              :show-customer-blocks="!!customerReport"
             />
           </div>
         </div>
@@ -304,6 +382,9 @@ function printView() {
           :header-text="task.headerText"
           :footer-text="task.footerText"
           :thumb-of="thumbs"
+          :customer-blocks="customerReport?.blocks.filter((b) => b.sheetIndex === s.index) ?? []"
+          :customer-color-of="(id) => customerReport?.colors[id]"
+          :show-customer-blocks="!!customerReport"
         />
       </div>
       <div class="print-sheet" style="width: 210mm; height: 297mm; padding: 15mm 0 0 15mm">

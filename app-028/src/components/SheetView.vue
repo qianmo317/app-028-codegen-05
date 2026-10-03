@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { Paper, Placement, Sheet } from '../logic/types'
+import type { CustomerBlock, Paper, Placement, Sheet } from '../logic/types'
 
 const props = withDefaults(
   defineProps<{
@@ -22,6 +22,10 @@ const props = withDefaults(
     footerText?: string
     thumbOf?: (p: Placement) => string | undefined
     labelOf?: (itemId: string) => string
+    customerBlocks?: CustomerBlock[]
+    customerColorOf?: (customerId: string) => string | undefined
+    showCustomerBlocks?: boolean
+    activeCustomerId?: string
   }>(),
   {
     safeEdgeMm: 3,
@@ -40,6 +44,10 @@ const props = withDefaults(
     footerText: '',
     thumbOf: undefined,
     labelOf: undefined,
+    customerBlocks: () => [],
+    customerColorOf: undefined,
+    showCustomerBlocks: false,
+    activeCustomerId: '',
   },
 )
 
@@ -177,6 +185,62 @@ const headerFontSize = computed(() => {
 })
 
 const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
+
+const blockBySeq = computed(() => {
+  const map = new Map<number, CustomerBlock>()
+  for (const b of props.customerBlocks ?? []) {
+    for (const seq of b.placementSeqs) map.set(seq, b)
+  }
+  return map
+})
+
+function placementCustomer(p: Placement): string {
+  return blockBySeq.value.get(p.seq)?.customerId ?? p.customerId ?? ''
+}
+
+function placementCustomerName(p: Placement): string {
+  return blockBySeq.value.get(p.seq)?.customerName ?? ''
+}
+
+function customerColor(p: Placement): string {
+  const id = placementCustomer(p)
+  return (id && props.customerColorOf?.(id)) || '#6d7c8f'
+}
+
+function blockStyle(b: CustomerBlock) {
+  const color = props.customerColorOf?.(b.customerId) ?? '#2563eb'
+  const dimmed = !!props.activeCustomerId && props.activeCustomerId !== b.customerId
+  return {
+    left: u(b.x),
+    top: u(b.y),
+    width: u(b.w),
+    height: u(b.h),
+    borderColor: color,
+    opacity: dimmed ? 0.22 : 1,
+    borderWidth: props.unit === 'mm' ? '0.55mm' : '3px',
+  }
+}
+
+function blockLabelStyle(b: CustomerBlock) {
+  const color = props.customerColorOf?.(b.customerId) ?? '#2563eb'
+  return {
+    left: u(b.x + 1.2),
+    top: u(b.y + 1.2),
+    color,
+    background: 'rgba(255,255,255,.88)',
+    border: `1px solid ${color}`,
+    fontSize: textSm.value,
+  }
+}
+
+function photoBorderStyle(p: Placement) {
+  const b = blockBySeq.value.get(p.seq)
+  return {
+    ...phStyle(p),
+    borderColor: props.showCustomerBlocks && b ? customerColor(p) : undefined,
+    borderWidth: props.unit === 'mm' ? (b ? '0.28mm' : '0.2mm') : b ? '2px' : '1px',
+  }
+}
 </script>
 
 <template>
@@ -209,12 +273,25 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       {{ footerText }}
     </div>
 
+    <template v-if="showCustomerBlocks">
+      <div
+        v-for="b in customerBlocks"
+        :key="b.id"
+        class="customer-block"
+        :style="blockStyle(b)"
+      >
+        <span class="customer-block-label" :style="blockLabelStyle(b)">
+          {{ b.customerName }} · {{ b.photoCount }}张
+        </span>
+      </div>
+    </template>
+
     <div
       v-for="p in sheet.placements"
       :key="p.seq"
       class="ph"
       :class="{ draggable, invalid, dragging: dragSeq === p.seq }"
-      :style="phStyle(p)"
+      :style="photoBorderStyle(p)"
       @pointerdown="onPointerDown($event, p)"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
@@ -223,6 +300,11 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       <img v-if="thumbOf && thumbOf(p)" :src="thumbOf(p)" alt="" draggable="false" />
       <template v-if="showNumbers">
         <span class="ph-no" :style="{ fontSize: textSm }">#{{ p.seq }}</span>
+        <span
+          v-if="showCustomerBlocks && placementCustomerName(p)"
+          class="ph-customer"
+          :style="{ fontSize: textXs, color: customerColor(p) }"
+        >{{ placementCustomerName(p) }}</span>
         <span v-if="showDetail" class="ph-dim" :style="{ fontSize: textXs }">
           {{ p.w.toFixed(0) }}×{{ p.h.toFixed(0) }}<template v-if="p.rotated">↻</template>
         </span>

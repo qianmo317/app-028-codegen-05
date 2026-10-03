@@ -504,6 +504,33 @@ table.data tr:hover td {
   padding: 0 3px;
   margin-top: 2px;
 }
+.ph .ph-customer {
+  position: relative;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.88);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-top: 1px;
+  white-space: nowrap;
+  max-width: calc(100% - 4px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.customer-block {
+  position: absolute;
+  border-style: solid;
+  background: rgba(37, 99, 235, 0.025);
+  pointer-events: none;
+  z-index: 2;
+  box-sizing: border-box;
+}
+.customer-block-label {
+  position: absolute;
+  font-weight: 700;
+  border-radius: 3px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
 .cutline {
   position: absolute;
   background: #b9c2ce;

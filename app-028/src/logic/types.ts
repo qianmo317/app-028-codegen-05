@@ -37,12 +37,15 @@ export interface Item {
   repeatSamePhoto: boolean
   /** true = 该尺寸的照片尽量不拆散，排在同一张相纸上 */
   keepTogether: boolean
+  /** 客户标记；旧任务为空表示尚未补标 */
+  customerId?: string
   photo?: PhotoRef
 }
 
 /** 实际照片矩形（mm，含旋转后的宽高） */
 export interface Placement {
   itemId: string
+  customerId?: string
   sheetIndex: number
   x: number
   y: number
@@ -97,6 +100,89 @@ export interface PackResult {
   stats: PackStats
 }
 
+/** 一个客户在一张纸上可直接裁开的独立矩形取件块 */
+export interface CustomerBlock {
+  id: string
+  sheetIndex: number
+  customerId: string
+  customerName: string
+  /** 切块外边界（含 kerf/gap 补偿），坐标精度统一到 0.01mm */
+  x: number
+  y: number
+  w: number
+  h: number
+  placementSeqs: number[]
+  photoCount: number
+}
+
+export interface CustomerCutRecord {
+  blockId: string
+  customerId: string
+  customerName: string
+  sheetIndex: number
+  stepIndex: number
+  axis: CutAxis
+  at: number
+  from: number
+  to: number
+  merged: boolean
+  /** boundary = 分户边界；internal = 客户包内部照片刀；shared = 共边刀同时承担两者 */
+  role: 'boundary' | 'internal' | 'shared'
+}
+
+export interface CustomerSheetUse {
+  sheetIndex: number
+  blockIds: string[]
+  blocks: CustomerBlock[]
+  photoCount: number
+}
+
+export interface CustomerPackage {
+  customerId: string
+  customerName: string
+  color: string
+  photoCount: number
+  sheets: CustomerSheetUse[]
+  blocks: CustomerBlock[]
+  cuts: CustomerCutRecord[]
+}
+
+export interface CustomerMergeReport {
+  merged: boolean
+  signature: string
+  customerIds: string[]
+  customerNames: Record<string, string>
+  colors: Record<string, string>
+  blocks: CustomerBlock[]
+  packages: CustomerPackage[]
+  cuts: CustomerCutRecord[]
+  baselineSheets: number
+  mergedSheets: number
+  baselineCents: number
+  mergedCents: number
+  savedSheets: number
+  savedCents: number
+  baselineUtilization: number
+  mergedUtilization: number
+  rule: string
+  /** 每张纸/边角是否让出给下一个客户的判据与结果 */
+  handoffs: CustomerHandoff[]
+}
+
+export interface CustomerHandoff {
+  sheetIndex: number
+  customerId: string
+  customerName: string
+  handedOff: boolean
+  reason: string
+  fittedCustomers: string[]
+  /** 客户独占时剩余的可切矩形（取切割树最大空叶，0.01mm） */
+  freeX: number
+  freeY: number
+  freeW: number
+  freeH: number
+}
+
 export interface CostReport {
   paperName: string
   sheets: number
@@ -122,6 +208,9 @@ export interface Task {
   kerfMm: number
   safeEdgeMm: number
   allowRotate: boolean
+  /** true = 多客户合并拼版；旧任务缺省时由客户数量自动判断 */
+  mergeCustomers?: boolean
+  customerReport?: CustomerMergeReport
   headerText: string
   footerText: string
   createdAt: number
