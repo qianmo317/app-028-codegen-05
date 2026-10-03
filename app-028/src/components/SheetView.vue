@@ -22,6 +22,12 @@ const props = withDefaults(
     footerText?: string
     thumbOf?: (p: Placement) => string | undefined
     labelOf?: (itemId: string) => string
+    customerColorOf?: (customerId?: string) => string | undefined
+    customerNameOf?: (customerId?: string) => string
+    /** 多客户合并：该纸上的客户块（来自引擎推导，含整块含边角的精确边界） */
+    blocks?: Array<{ id: string; customerId: string; x: number; y: number; w: number; h: number }>
+    showBlocks?: boolean
+    showBoundaryCuts?: boolean
   }>(),
   {
     safeEdgeMm: 3,
@@ -40,6 +46,11 @@ const props = withDefaults(
     footerText: '',
     thumbOf: undefined,
     labelOf: undefined,
+    customerColorOf: undefined,
+    customerNameOf: undefined,
+    blocks: undefined,
+    showBlocks: false,
+    showBoundaryCuts: false,
   },
 )
 
@@ -87,32 +98,78 @@ const safeStyle = computed(() => ({
 }))
 
 function phStyle(p: Placement) {
+  const color = props.customerColorOf?.(p.customerId)
   return {
     left: u(p.x),
     top: u(p.y),
     width: u(p.w),
     height: u(p.h),
     borderWidth: props.unit === 'mm' ? '0.2mm' : '1px',
+    borderColor: color ?? undefined,
+    background: color ? `${color}22` : undefined,
+  }
+}
+
+function customerTag(p: Placement) {
+  return props.customerNameOf ? props.customerNameOf(p.customerId) : ''
+}
+
+/** 块矩形（多客户合并拼版时画出客户分界）；边界直接取引擎推导值，保证预览与导出一致 */
+const blockRects = computed<BlockRect[]>(() => {
+  if (!props.showBlocks || !props.blocks) return []
+  return props.blocks.map((b) => ({
+    id: b.id,
+    x: b.x,
+    y: b.y,
+    w: b.w,
+    h: b.h,
+    customerId: b.customerId,
+    color: props.customerColorOf?.(b.customerId),
+  }))
+})
+
+interface BlockRect {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  customerId: string
+  color?: string
+}
+
+function blockStyle(b: BlockRect) {
+  return {
+    left: u(b.x),
+    top: u(b.y),
+    width: u(b.w),
+    height: u(b.h),
+    borderColor: b.color ?? '#e53935',
+    borderWidth: props.unit === 'mm' ? '0.5mm' : '2.5px',
   }
 }
 
 function cutStyle(c: Sheet['cutSteps'][number], index: number) {
   const active = props.highlight === index
   const done = props.doneCount >= 0 && index < props.doneCount
-  const color = active ? '#e53935' : done ? '#1a7f4b' : '#9aa6b4'
+  const boundary = props.showBoundaryCuts && c.role === 'boundary'
+  const color = boundary ? '#e53935' : active ? '#e53935' : done ? '#1a7f4b' : '#9aa6b4'
   const base: Record<string, string> = {
     background: color,
-    zIndex: active ? '6' : '3',
+    zIndex: active || boundary ? '6' : '3',
+  }
+  if (boundary) {
+    base.boxShadow = '0 0 0 1px rgba(229,57,53,0.25)'
   }
   if (c.axis === 'v') {
     base.left = u(c.at)
     base.top = u(c.from)
-    base.width = cutW.value
+    base.width = boundary && props.unit === 'px' ? '3px' : cutW.value
     base.height = u(c.to - c.from)
   } else {
     base.top = u(c.at)
     base.left = u(c.from)
-    base.height = cutW.value
+    base.height = boundary && props.unit === 'px' ? '3px' : cutW.value
     base.width = u(c.to - c.from)
   }
   return base
@@ -209,6 +266,16 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       {{ footerText }}
     </div>
 
+    <!-- 客户块分界（多客户合并拼版）：虚线框 = 独立能裁开的一块 -->
+    <div
+      v-for="b in blockRects"
+      :key="`blk${b.id}`"
+      class="customer-block"
+      :style="blockStyle(b)"
+    >
+      <span class="block-tag" :style="{ fontSize: textXs, color: b.color }">{{ b.id }}</span>
+    </div>
+
     <div
       v-for="p in sheet.placements"
       :key="p.seq"
@@ -223,6 +290,9 @@ const showDetail = computed(() => props.scale >= 1.6 || props.unit === 'mm')
       <img v-if="thumbOf && thumbOf(p)" :src="thumbOf(p)" alt="" draggable="false" />
       <template v-if="showNumbers">
         <span class="ph-no" :style="{ fontSize: textSm }">#{{ p.seq }}</span>
+        <span v-if="customerTag(p)" class="ph-cust" :style="{ fontSize: textXs, color: customerColorOf?.(p.customerId) }"
+          >{{ customerTag(p) }}</span
+        >
         <span v-if="showDetail" class="ph-dim" :style="{ fontSize: textXs }">
           {{ p.w.toFixed(0) }}×{{ p.h.toFixed(0) }}<template v-if="p.rotated">↻</template>
         </span>

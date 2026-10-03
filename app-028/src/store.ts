@@ -10,9 +10,12 @@ import {
   resolvePaper,
 } from './logic/library'
 import { pack, sheetsFromPlacements } from './logic/packer'
+import { packMerge } from './logic/merge'
 import { loadJSON, saveJSON } from './logic/storage'
 import type {
   Leftover,
+  MergeItem,
+  MergeJob,
   Paper,
   PaperTemplate,
   PhotoRef,
@@ -29,6 +32,7 @@ const KEY = {
   settings: 'ppis.settings.v1',
   tasks: 'ppis.tasks.v1',
   leftovers: 'ppis.leftovers.v1',
+  mergeJobs: 'ppis.mergeJobs.v1',
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -44,12 +48,14 @@ export const customSizes = ref<PhotoSize[]>(loadJSON<PhotoSize[]>(KEY.customSize
 export const settings = ref<Settings>({ ...DEFAULT_SETTINGS, ...loadJSON(KEY.settings, {}) })
 export const tasks = ref<Task[]>(loadJSON<Task[]>(KEY.tasks, []))
 export const leftovers = ref<Leftover[]>(loadJSON<Leftover[]>(KEY.leftovers, []))
+export const mergeJobs = ref<MergeJob[]>(loadJSON<MergeJob[]>(KEY.mergeJobs, []))
 
 watch(customPapers, (v) => saveJSON(KEY.customPapers, v), { deep: true })
 watch(customSizes, (v) => saveJSON(KEY.customSizes, v), { deep: true })
 watch(settings, (v) => saveJSON(KEY.settings, v), { deep: true })
 watch(tasks, (v) => saveJSON(KEY.tasks, v), { deep: true })
 watch(leftovers, (v) => saveJSON(KEY.leftovers, v), { deep: true })
+watch(mergeJobs, (v) => saveJSON(KEY.mergeJobs, v), { deep: true })
 
 export const allPapers = computed<Paper[]>(() => [...BUILTIN_PAPERS, ...customPapers.value])
 export const allSizes = computed<PhotoSize[]>(() => [...BUILTIN_PHOTO_SIZES, ...customSizes.value])
@@ -243,4 +249,88 @@ export function markLeftoverUsed(id: string): void {
   leftovers.value = leftovers.value.map((l) =>
     l.id === id ? { ...l, usedCount: l.usedCount + 1 } : l,
   )
+}
+
+/* ================= 多客户合并拼版 ================= */
+
+export function getMergeJob(id: string): MergeJob | undefined {
+  return mergeJobs.value.find((j) => j.id === id)
+}
+
+export function createMergeJob(partial: Partial<MergeJob> = {}): MergeJob {
+  const job: MergeJob = {
+    id: newId('merge'),
+    name: partial.name ?? `合并拼版 ${mergeJobs.value.length + 1}`,
+    paperId: partial.paperId ?? 'p12x18',
+    customPaper: partial.customPaper,
+    customers: partial.customers ?? [],
+    items: partial.items ?? [],
+    gapMm: partial.gapMm ?? settings.value.gapMm,
+    kerfMm: partial.kerfMm ?? settings.value.kerfMm,
+    safeEdgeMm: partial.safeEdgeMm ?? settings.value.safeEdgeMm,
+    allowRotate: partial.allowRotate ?? settings.value.allowRotate,
+    handoverPolicy: partial.handoverPolicy ?? 'auto',
+    createdAt: Date.now(),
+  }
+  mergeJobs.value.unshift(job)
+  return job
+}
+
+export function deleteMergeJob(id: string): void {
+  mergeJobs.value = mergeJobs.value.filter((j) => j.id !== id)
+}
+
+/** 把合并任务的条目（补尺寸名）转成引擎输入 */
+export function mergeGroupsFromJob(job: MergeJob): MergeItem[] {
+  return job.items
+    .filter((it) => it.copies > 0)
+    .map((it) => {
+      const size = allSizes.value.find((s) => s.id === it.itemId)
+      return {
+        ...it,
+        sizeName: it.sizeName ?? (size ? `${size.name} ${size.wMm}×${size.hMm}` : undefined),
+      }
+    })
+}
+
+/** 执行合并拼版；成功返回 undefined，失败（整批停下）返回点名客户的错误信息 */
+export function runMerge(job: MergeJob): string | undefined {
+  const paper = resolvePaper(job as unknown as Task, allPapers.value)
+  const out = packMerge(
+    job.customers,
+    job.items,
+    {
+      wMm: paper.wMm,
+      hMm: paper.hMm,
+      marginMm: paper.marginMm,
+      priceCents: paper.priceCents,
+    },
+    {
+      gapMm: job.gapMm,
+      kerfMm: job.kerfMm,
+      safeEdgeMm: job.safeEdgeMm,
+      allowRotate: job.allowRotate,
+    },
+    job.handoverPolicy,
+  )
+  if (out.error) {
+    job.result = undefined
+    job.error = out.error
+    touch()
+    return out.error
+  }
+  job.result = out.result
+  job.error = undefined
+  touch()
+  return undefined
+}
+
+export function mergePaperOf(job: MergeJob): Paper {
+  return resolvePaper(job as unknown as Task, allPapers.value)
+}
+
+/** 合并任务中某条目尺寸名（供导出列） */
+export function mergeSizeName(itemId: string): string {
+  const s = allSizes.value.find((x) => x.id === itemId)
+  return s ? `${s.name} ${s.wMm}×${s.hMm}mm` : itemId
 }

@@ -11,6 +11,7 @@ import { RouterLink, RouterView } from 'vue-router'
       </div>
       <nav class="nav">
         <RouterLink to="/" exact-active-class="active" active-class="">新建任务</RouterLink>
+        <RouterLink to="/merge" active-class="active">合并拼版</RouterLink>
         <RouterLink to="/papers" active-class="active">尺寸库</RouterLink>
         <RouterLink to="/settings" active-class="active">裁切参数</RouterLink>
       </nav>

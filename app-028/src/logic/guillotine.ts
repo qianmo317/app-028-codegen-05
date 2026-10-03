@@ -173,12 +173,23 @@ export function decompose(
   region: Rect,
   rects: Rect[],
   budget: { n: number } = { n: 60000 },
+  seen: Set<string> = new Set(),
 ): CutLine[] | null {
   for (const r of rects) {
     if (!rectContains(region, r)) return null
   }
   if (rects.length === 0) return []
   if (rects.length === 1) return trimCuts(region, rects[0])
+  // 防御：同一（区域 + 矩形集合）重复进入说明某次切分没有真正缩小区域，
+  // 直接判该分支不可解，避免浮点/共边情形下无限递归（栈溢出）。
+  const sig =
+    `${region.x.toFixed(4)},${region.y.toFixed(4)},${region.w.toFixed(4)},${region.h.toFixed(4)}|` +
+    rects
+      .map((r) => `${r.x.toFixed(4)},${r.y.toFixed(4)},${r.w.toFixed(4)},${r.h.toFixed(4)}`)
+      .sort()
+      .join(';')
+  if (seen.has(sig)) return null
+  seen.add(sig)
   const cands = buildCandidates(region, rects)
   cands.sort((p, q) => {
     const sp = candidateScore(p)
@@ -190,14 +201,160 @@ export function decompose(
   })
   for (const c of cands) {
     if (budget.n-- <= 0) return null
-    const a = decompose(c.aRegion, c.aRects, budget)
+    // 每一刀都必须真正把区域分成两块正宽/正高的子区域，否则不算有效切分
+    const progresses =
+      c.axis === 'v'
+        ? c.aRegion.w > EPS && c.bRegion.w > EPS
+        : c.aRegion.h > EPS && c.bRegion.h > EPS
+    if (!progresses) continue
+    const childSeen = new Set(seen)
+    const a = decompose(c.aRegion, c.aRects, budget, childSeen)
     if (!a) continue
-    const b = decompose(c.bRegion, c.bRects, budget)
+    const b = decompose(c.bRegion, c.bRects, budget, childSeen)
     if (!b) continue
     const cut: CutLine =
       c.axis === 'v'
         ? { axis: 'v', at: c.at, from: region.y, to: region.y + region.h }
         : { axis: 'h', at: c.at, from: region.x, to: region.x + region.w }
+    return [cut, ...a, ...b]
+  }
+  return null
+}
+
+/**
+ * 属主感知的 guillotine 拆解（多客户合并拼版专用）。
+ * 规则：在「含多个客户」的区域里，优先选把不同客户干净分开的整边切割线（分界刀），
+ * 使每个客户的照片先被切进各自的单客户块；进入单客户区域后再按几何拆成单张（块内刀）。
+ * 返回的每一刀带 role：boundary = 客户分界刀，internal = 客户块内部刀。
+ * 与 decompose 一样只走整边贯通切割，结果天然合法。
+ */
+export interface OwnerCutLine extends CutLine {
+  role: 'boundary' | 'internal'
+}
+
+interface OwnerCandidate {
+  axis: CutAxis
+  at: number
+  aRects: number[]
+  bRects: number[]
+  aRegion: Rect
+  bRegion: Rect
+  aOwners: Set<string>
+  bOwners: Set<string>
+  /** 是否把不同客户分开（干净：任一侧都不跨越该客户的两张照片） */
+  separates: boolean
+  edgeCount: number
+}
+
+function buildOwnerCandidates(
+  region: Rect,
+  rects: Rect[],
+  ownerOf: (i: number) => string,
+): OwnerCandidate[] {
+  const out: OwnerCandidate[] = []
+  const xs = new Set<number>()
+  const ys = new Set<number>()
+  for (const r of rects) {
+    xs.add(r.x)
+    xs.add(r.x + r.w)
+    ys.add(r.y)
+    ys.add(r.y + r.h)
+  }
+  const ownersOf = (idx: number[]) => new Set(idx.map(ownerOf))
+  const spans = (axis: CutAxis, r: Rect, at: number) =>
+    axis === 'v' ? r.x < at - EPS && r.x + r.w > at + EPS : r.y < at - EPS && r.y + r.h > at + EPS
+  const collect = (axis: CutAxis, coords: Set<number>) => {
+    for (const at of coords) {
+      if (axis === 'v') {
+        if (at <= region.x + EPS || at >= region.x + region.w - EPS) continue
+      } else if (at <= region.y + EPS || at >= region.y + region.h - EPS) continue
+      if (rects.some((r) => spans(axis, r, at))) continue
+      const aRects: number[] = []
+      const bRects: number[] = []
+      rects.forEach((r, i) => {
+        const lo = axis === 'v' ? r.x : r.y
+        const hi = lo + (axis === 'v' ? r.w : r.h)
+        if (hi <= at + EPS) aRects.push(i)
+        else if (lo >= at - EPS) bRects.push(i)
+      })
+      if (aRects.length + bRects.length !== rects.length) continue
+      const aOwners = ownersOf(aRects)
+      const bOwners = ownersOf(bRects)
+      // 干净分开：两侧属主集合不相交
+      const intersects = [...aOwners].some((o) => bOwners.has(o))
+      const aRegion: Rect =
+        axis === 'v'
+          ? { x: region.x, y: region.y, w: at - region.x, h: region.h }
+          : { x: region.x, y: region.y, w: region.w, h: at - region.y }
+      const bRegion: Rect =
+        axis === 'v'
+          ? { x: at, y: region.y, w: region.x + region.w - at, h: region.h }
+          : { x: region.x, y: at, w: region.w, h: region.y + region.h - at }
+      let edgeCount = 0
+      for (const r of rects) {
+        const lo = axis === 'v' ? r.x : r.y
+        const hi = lo + (axis === 'v' ? r.w : r.h)
+        if (Math.abs(lo - at) < EPS || Math.abs(hi - at) < EPS) edgeCount++
+      }
+      out.push({
+        axis,
+        at,
+        aRects,
+        bRects,
+        aRegion,
+        bRegion,
+        aOwners,
+        bOwners,
+        separates: !intersects && aOwners.size > 0 && bOwners.size > 0,
+        edgeCount,
+      })
+    }
+  }
+  collect('v', xs)
+  collect('h', ys)
+  return out
+}
+
+export function decomposeByOwner(
+  region: Rect,
+  rects: Rect[],
+  ownerOf: (i: number) => string,
+  budget: { n: number } = { n: 60000 },
+): OwnerCutLine[] | null {
+  for (const r of rects) {
+    if (!rectContains(region, r)) return null
+  }
+  if (rects.length === 0) return []
+  const owners = new Set(rects.map((_, i) => ownerOf(i)))
+  if (owners.size <= 1) {
+    // 单客户（或无客户）区域：退化为纯几何拆解，全部为块内刀
+    const geo = decompose(region, rects, budget)
+    if (!geo) return null
+    return geo.map((c) => ({ ...c, role: 'internal' as const }))
+  }
+  const cands = buildOwnerCandidates(region, rects, ownerOf)
+  // 先挑「干净分开客户」的刀；再退而求其次挑任意合法 guillotine 刀
+  cands.sort((p, q) => {
+    if (p.separates !== q.separates) return p.separates ? -1 : 1
+    // 优先把客户分得更均衡、共边更多
+    const dp = Math.abs(p.aOwners.size - p.bOwners.size)
+    const dq = Math.abs(q.aOwners.size - q.bOwners.size)
+    if (dp !== dq) return dp - dq
+    return q.edgeCount - p.edgeCount
+  })
+  for (const c of cands) {
+    if (budget.n-- <= 0) return null
+    const aRects = c.aRects.map((i) => rects[i])
+    const bRects = c.bRects.map((i) => rects[i])
+    const a = decomposeByOwner(c.aRegion, aRects, (i) => ownerOf(c.aRects[i]), budget)
+    if (!a) continue
+    const b = decomposeByOwner(c.bRegion, bRects, (i) => ownerOf(c.bRects[i]), budget)
+    if (!b) continue
+    const role: 'boundary' | 'internal' = c.separates ? 'boundary' : 'internal'
+    const cut: OwnerCutLine =
+      c.axis === 'v'
+        ? { axis: 'v', at: c.at, from: region.y, to: region.y + region.h, role }
+        : { axis: 'h', at: c.at, from: region.x, to: region.x + region.w, role }
     return [cut, ...a, ...b]
   }
   return null

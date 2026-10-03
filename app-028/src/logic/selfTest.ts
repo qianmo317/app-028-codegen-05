@@ -4,9 +4,10 @@
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
+import { packMerge, relabelMerge } from './merge'
 import { buildPdf } from './pdf'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { MergeItem, Paper, Placement, Sheet } from './types'
 
 export interface AssertionResult {
   id: string
@@ -482,6 +483,136 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 多客户合并拼版：块独立可裁开、张数守恒、省纸、确定性、放不下整批停、旧任务补标 */
+function assertMergeCustomers(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const paper = BUILTIN_PAPERS.find((p) => p.id === 'p12x18') as Paper
+  const cut = { gapMm: 0, kerfMm: 0.5, safeEdgeMm: 3, allowRotate: true }
+  const opts: PackOptions = {
+    paperW: paper.wMm,
+    paperH: paper.hMm,
+    marginMm: paper.marginMm,
+    safeEdgeMm: 3,
+    gapMm: 0,
+    kerfMm: 0.5,
+    allowRotate: true,
+  }
+  const region = usableRegion(opts)!
+  const mm = (cut.kerfMm + cut.gapMm) / 2
+  const customers = [
+    { id: 'A', name: '客户甲' },
+    { id: 'B', name: '客户乙' },
+    { id: 'C', name: '客户丙' },
+  ]
+  const mk = (c: string, i: number, copies: number, w: number, h: number): MergeItem => ({
+    itemId: `${c}-${i}`,
+    customerId: c,
+    copies,
+    photoW: w,
+    photoH: h,
+    allowRotate: true,
+    keepTogether: false,
+  })
+  const items = [mk('A', 1, 6, 102, 152), mk('B', 1, 4, 89, 127), mk('C', 1, 20, 25, 35)]
+
+  const out = packMerge(customers, items, paper, cut, 'auto')
+  if (out.error || !out.result) {
+    return { id: 'merge-cust', title: '⑧ 多客户合并拼版', pass: false, detail: out.error ?? '排样失败', ms: 0 }
+  }
+  const r = out.result
+
+  // guillotine 仍合法
+  for (const s of r.sheets) {
+    const slots = s.placements.map((p) => ({ x: p.x - mm, y: p.y - mm, w: p.w + 2 * mm, h: p.h + 2 * mm }))
+    const v = validateCutSequence(
+      region,
+      slots,
+      s.cutSteps.map((c2) => ({ axis: c2.axis, at: c2.at, from: c2.from, to: c2.to })),
+    )
+    if (!v.ok) problems.push(`第 ${s.index + 1} 张切割不合法：${v.reason}`)
+  }
+  // 块同纸不重叠；每照片唯一归属同客户块且落在块内
+  for (let i = 0; i < r.blocks.length; i++) {
+    for (let j = i + 1; j < r.blocks.length; j++) {
+      const a = r.blocks[i]
+      const b = r.blocks[j]
+      if (a.sheetIndex !== b.sheetIndex) continue
+      const ox = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x)
+      const oy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)
+      if (ox > 0.05 && oy > 0.05) problems.push('客户块发生重叠')
+    }
+  }
+  for (const s of r.sheets) {
+    for (const p of s.placements) {
+      const b = r.blocks.find((bb) => bb.placementSeqs.includes(p.seq))
+      if (!b || b.customerId !== p.customerId) problems.push(`#${p.seq} 块归属错误`)
+      else if (
+        p.x < b.x - 0.02 ||
+        p.y < b.y - 0.02 ||
+        p.x + p.w > b.x + b.w + 0.02 ||
+        p.y + p.h > b.y + b.h + 0.02
+      ) {
+        problems.push(`#${p.seq} 超出所属客户块`)
+      }
+    }
+  }
+  // 张数守恒
+  for (const c of customers) {
+    const expect = items.filter((g) => g.customerId === c.id).reduce((a, g) => a + g.copies, 0)
+    const got = r.parcels.find((p) => p.customerId === c.id)?.photoCount ?? -1
+    if (got !== expect) problems.push(`${c.name} 张数 ${got}≠${expect}`)
+  }
+  // 省纸
+  if (r.compare.mergedSheets > r.compare.separateSheets) problems.push('合并比分排更费纸')
+  if (r.compare.savedCents !== r.compare.savedSheets * paper.priceCents) problems.push('省钱金额不自洽')
+
+  // 确定性：连排两次
+  const out2 = packMerge(customers, items, paper, cut, 'auto')
+  const sig = JSON.stringify(r.sheets.map((s) => s.placements))
+  if (JSON.stringify(out2.result!.sheets.map((s) => s.placements)) !== sig) problems.push('连排两次结果不一致')
+
+  // 放不下整批停 + 点名客户
+  const bad = packMerge(customers, [mk('A', 9, 1, 400, 400), mk('B', 9, 1, 25, 35)], paper, cut, 'auto')
+  if (!bad.error || !bad.error.includes('客户甲') || bad.result) {
+    problems.push('放不下时未整批停止或未点名客户')
+  }
+
+  // 旧任务补标：几何不动
+  const single = packMerge([{ id: 'A', name: '甲' }], [mk('A', 1, 10, 89, 127)], paper, cut, 'auto').result!
+  const oldP: Placement[] = single.sheets
+    .flatMap((s) => s.placements)
+    .map((p) => ({ ...p, customerId: undefined, blockId: undefined }))
+    .sort((a, b) => a.seq - b.seq)
+  const rel = relabelMerge(
+    oldP,
+    opts,
+    [
+      { id: 'X', name: 'X' },
+      { id: 'Y', name: 'Y' },
+    ],
+    (p) => (oldP.indexOf(p) % 2 === 0 ? 'X' : 'Y'),
+  )
+  if (rel.error || rel.result!.parcels.length !== 2) problems.push('旧任务补标失败')
+  const moved = rel.result!.sheets.some((s) =>
+    s.placements.some((p) => {
+      const o = oldP.find((q) => q.seq === p.seq)!
+      return Math.abs(p.x - o.x) > 1e-9 || Math.abs(p.y - o.y) > 1e-9
+    }),
+  )
+  if (moved) problems.push('补标改变了照片几何')
+
+  return {
+    id: 'merge-cust',
+    title: '⑧ 多客户合并拼版：块独立可裁开、张数守恒、省纸、确定性、放不下整批停、旧任务补标',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `合并 ${r.compare.mergedSheets} 张 vs 分开 ${r.compare.separateSheets} 张，省 ${r.compare.savedSheets} 张/${(r.compare.savedCents / 100).toFixed(2)} 元；${r.stats.blockCount} 块、让出 ${r.stats.handoverGranted} 次；三客户张数守恒、块不重叠、连排两次一致`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +632,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertMergeCustomers())
   return results
 }
